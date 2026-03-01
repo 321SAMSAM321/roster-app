@@ -83,7 +83,7 @@ def parse_leave_requests(text, staffs):
                 leave_dict[name] = dates
     return leave_dict
 
-# 🌟 新增：衝突自動診斷函數
+# 🌟 升級版：精準衝突診斷函數
 def diagnose_conflicts(year, month, leave_dict, fixed_rest_dict, sw_list, all_list, min_t, min_s):
     start_day_index = calendar.weekday(year, month, 1)
     num_days = calendar.monthrange(year, month)[1] 
@@ -95,7 +95,6 @@ def diagnose_conflicts(year, month, leave_dict, fixed_rest_dict, sw_list, all_li
         current_weekday = (start_day_index + d) % 7
         date_str = f"{month}月{d+1}日(星期{days_name[current_weekday]})"
         
-        # 計算當天有哪些人因為「固定休假」或「請假」而無法上班
         unavailable_staff = []
         unavailable_sw = []
         
@@ -111,16 +110,14 @@ def diagnose_conflicts(year, month, leave_dict, fixed_rest_dict, sw_list, all_li
                 if name in sw_list:
                     unavailable_sw.append(name)
         
-        # 計算當天剩下多少人
         available_total = len(all_list) - len(unavailable_staff)
         available_sw = len(sw_list) - len(unavailable_sw)
         
-        # 抓出不符合最低要求的日子
         if available_total < min_t:
-            issues.append(f"🔴 **{date_str}**：最少需要 {min_t} 人上班，但當天有 **{len(unavailable_staff)} 人** 放假 (`{', '.join(unavailable_staff)}`)，只剩下 **{available_total}** 人。")
+            issues.append(f"🔴 **{date_str}**：最少需 {min_t} 人，但當天有 **{len(unavailable_staff)} 人** 放假 (`{', '.join(unavailable_staff)}`)，只剩 **{available_total}** 人。")
             
         if available_sw < min_s:
-            issues.append(f"🟠 **{date_str}**：最少需要 {min_s} 名社工，但當天社工只剩下 **{available_sw}** 人可上班 (當天放假社工：`{', '.join(unavailable_sw) if unavailable_sw else '無'}`)。")
+            issues.append(f"🟠 **{date_str}**：最少需 {min_s} 名社工，但社工只剩 **{available_sw}** 人 (當天放假社工：`{', '.join(unavailable_sw)}`)。")
             
     return issues
 
@@ -137,19 +134,21 @@ def generate_schedule(year, month, leave_dict, fixed_rest_dict, sw_list, all_lis
         for d in range(num_days):
             work[(s, d)] = model.NewBoolVar(f'work_s{s}_d{d}')
 
+    # 每天人手上下限
     for d in range(num_days):
         model.Add(sum(work[(s, d)] for s in range(total_staff_count)) >= min_t)
         model.Add(sum(work[(s, d)] for s in range(total_staff_count)) <= max_t)
         model.Add(sum(work[(s, d)] for s in range(len(sw_list))) >= min_s)
         model.Add(sum(work[(s, d)] for s in range(len(sw_list))) <= max_s)
 
+    # 🌟 解除數學陷阱：只保留「每連續 7 天最多上 4 天班」的勞工保障條款
     for s in range(total_staff_count):
         for d in range(num_days - 6):
             model.Add(sum(work[(s, d + i)] for i in range(7)) <= 4)
-        min_work_days = int((num_days / 7) * 4) 
-        model.Add(sum(work[(s, d)] for d in range(num_days)) >= min_work_days - 1)
-        model.Add(sum(work[(s, d)] for d in range(num_days)) <= min_work_days + 1)
+        # 設定一個非常寬鬆的下限，防止有人整個月都不用上班
+        model.Add(sum(work[(s, d)] for d in range(num_days)) >= 10)
 
+    # 固定星期幾休假
     for name, weekdays in fixed_rest_dict.items():
         if name in all_list:
             s_idx = all_list.index(name)
@@ -157,6 +156,7 @@ def generate_schedule(year, month, leave_dict, fixed_rest_dict, sw_list, all_lis
                 if (start_day_index + d) % 7 in weekdays:
                     model.Add(work[(s_idx, d)] == 0)
 
+    # 特定日期請假
     for name, dates in leave_dict.items():
         if name in all_list:
             s_idx = all_list.index(name)
@@ -201,17 +201,18 @@ if st.button(f"🚀 讓 AI 生成 {selected_year} 年 {selected_month} 月份更
                 st.session_state['schedule_df'] = df
                 st.success(f"✅ 生成成功！已確保每天最少 {min_staff} 人上班。")
             else:
-                st.error("❌ 無法排班！AI 發現了以下衝突導致無法湊齊人數：")
+                st.error("❌ 無法排班！AI 診斷報告如下：")
                 
-                # 🌟 觸發診斷系統並顯示報告
                 conflict_reports = diagnose_conflicts(selected_year, selected_month, parsed_leaves, parsed_fixed, sw_staffs, all_staffs, min_staff, min_sw)
                 
                 if conflict_reports:
                     for report in conflict_reports:
                         st.warning(report)
-                    st.info("💡 建議做法：請刪減上述日期的請假人數，或前往左側邊欄降低「每天最少人數」的要求。")
+                    st.info("💡 解決方案：請修改上述日期的請假人數，或前往左側調低「每天最少人數」。")
                 else:
-                    st.warning("⚠️ 每日基本人手雖然足夠，但可能是因為「每人每週必須放 3 天假」的勞工工時限制，導致連假安排產生骨牌效應衝突。請嘗試放寬幾位同事的請假設定。")
+                    # 如果沒有特定日期低於底線，但還是排不出來
+                    st.warning("⚠️ 診斷結果：沒有任何一天的『帳面人數』低於最低要求。這代表發生了『連鎖反應衝突』。")
+                    st.info("💡 發生原因：通常是因為某位同事的『特定請假』加上他的『固定休假』，導致他這週無法上班，進而逼迫其他同事連續上班超過 4 天，違反了勞工權益設定。\n\n**解決方案：請嘗試減少一兩位同事的特定日期請假，再試一次！**")
 
 if 'schedule_df' in st.session_state:
     st.markdown("### 📝 手動微調區 (雙擊表格修改)")
