@@ -8,20 +8,16 @@ st.set_page_config(page_title="旺角社區客廳 排更系統", layout="wide")
 st.title("📅 旺角社區客廳 - 智能排更與微調系統")
 
 # ==========================================
-# 🌟 新增：左側邊欄 (Sidebar) - 員工名單管理
+# 左側邊欄 (Sidebar) - 員工與固定假期管理
 # ==========================================
-st.sidebar.header("👥 員工名單管理")
-st.sidebar.info("請在此新增或刪除同事名字（每行輸入一位）。系統會自動辨識並更新排班。")
+st.sidebar.header("👥 員工名單與固定休假")
 
-# 預設名單
 default_sw = "李絲格(SW)\n陳家俊(SW)\n朱信恆(SW)\n韓浩文(SW)"
 default_normal = "許紫慧\n王琴美\n許曉彬\n李琳\n曾詠詩"
 
-# 讓使用者在側邊欄修改名單
-sw_text = st.sidebar.text_area("💼 社工 (SW) 名單：", value=default_sw, height=150)
-normal_text = st.sidebar.text_area("🧑‍💼 一般員工名單：", value=default_normal, height=150)
+sw_text = st.sidebar.text_area("💼 社工 (SW) 名單：", value=default_sw, height=120)
+normal_text = st.sidebar.text_area("🧑‍💼 一般員工名單：", value=default_normal, height=120)
 
-# 將文字框的內容轉換為程式可以讀取的清單 (並自動去除空白)
 sw_staffs = [name.strip() for name in sw_text.split('\n') if name.strip()]
 normal_staffs = [name.strip() for name in normal_text.split('\n') if name.strip()]
 all_staffs = sw_staffs + normal_staffs
@@ -29,8 +25,32 @@ num_staff = len(all_staffs)
 
 st.sidebar.success(f"目前共計：{num_staff} 人 (含 {len(sw_staffs)} 位社工)")
 
+# 🌟 新增：固定星期幾休假的輸入區
+st.sidebar.markdown("---")
+st.sidebar.subheader("🗓️ 固定星期幾休假")
+st.sidebar.info("格式：`名字: 一, 二, 三, 四, 五, 六, 日`")
+default_fixed_rest = "朱信恆(SW): 日\n陳家俊(SW): 二, 五, 六"
+fixed_rest_text = st.sidebar.text_area("✍️ 在此輸入固定放假要求：", value=default_fixed_rest, height=100)
+
+def parse_fixed_weekdays(text, staffs):
+    day_map = {'一': 0, '二': 1, '三': 2, '四': 3, '五': 4, '六': 5, '日': 6}
+    fixed_dict = {}
+    if not text.strip(): return fixed_dict
+    text = text.replace('：', ':').replace('，', ',')
+    for line in text.split('\n'):
+        if ':' in line:
+            parts = line.split(':')
+            name = parts[0].strip()
+            if name in staffs:
+                days_str = parts[1]
+                # 抓出字串中的中文字，並轉換成 0-6 的數字
+                days = [day_map[d.strip()] for d in days_str.split(',') if d.strip() in day_map]
+                if days:
+                    fixed_dict[name] = days
+    return fixed_dict
+
 # ==========================================
-# 主畫面：選擇年月與預先請假
+# 主畫面：選擇年月與預先請假 (單次特定日期)
 # ==========================================
 col1, col2 = st.columns(2)
 with col1:
@@ -38,14 +58,13 @@ with col1:
 with col2:
     selected_month = st.selectbox("📅 請選擇月份", list(range(1, 13)), index=4)
 
-st.markdown("### 🏖️ 預先請假 / 指定休假設定 (選填)")
-st.info("請依照格式輸入：`同事名字: 日期, 日期` (換行輸入另一位)。")
-leave_requests_text = st.text_area("✍️ 在此輸入請假需求：", height=100)
+st.markdown("### 🏖️ 指定日期請假 (大假 AL / 補假 CL)")
+st.info("格式：`名字: 12, 13, 25` (換行輸入另一位)。")
+leave_requests_text = st.text_area("✍️ 在此輸入單次請假需求：", height=100)
 
 def parse_leave_requests(text, staffs):
     leave_dict = {}
-    if not text.strip():
-        return leave_dict
+    if not text.strip(): return leave_dict
     text = text.replace('：', ':').replace('，', ',')
     for line in text.split('\n'):
         if ':' in line:
@@ -58,9 +77,9 @@ def parse_leave_requests(text, staffs):
     return leave_dict
 
 # ==========================================
-# 核心排班大腦 (引入動態名單)
+# 核心排班大腦
 # ==========================================
-def generate_schedule(year, month, leave_dict, sw_list, all_list):
+def generate_schedule(year, month, leave_dict, fixed_rest_dict, sw_list, all_list):
     start_day_index = calendar.weekday(year, month, 1)
     num_days = calendar.monthrange(year, month)[1] 
     days_name = ['一', '二', '三', '四', '五', '六', '日']
@@ -72,7 +91,7 @@ def generate_schedule(year, month, leave_dict, sw_list, all_list):
         for d in range(num_days):
             work[(s, d)] = model.NewBoolVar(f'work_s{s}_d{d}')
 
-    # 基本人手限制 (每天至少 5 人，包含 2 名社工)
+    # 基本人手限制
     for d in range(num_days):
         model.Add(sum(work[(s, d)] for s in range(total_staff_count)) >= 5)
         model.Add(sum(work[(s, d)] for s in range(total_staff_count)) <= 6)
@@ -87,20 +106,16 @@ def generate_schedule(year, month, leave_dict, sw_list, all_list):
         model.Add(sum(work[(s, d)] for d in range(num_days)) >= min_work_days - 1)
         model.Add(sum(work[(s, d)] for d in range(num_days)) <= min_work_days + 1)
 
-    # 🌟 防呆機制：檢查名單裡是否還有這兩位同事，有的話才套用特定規則
-    if '朱信恆(SW)' in all_list:
-        chu_idx = all_list.index('朱信恆(SW)')
-        for d in range(num_days):
-            if (start_day_index + d) % 7 == 6:
-                model.Add(work[(chu_idx, d)] == 0)
-                
-    if '陳家俊(SW)' in all_list:
-        chen_idx = all_list.index('陳家俊(SW)')
-        for d in range(num_days):
-            if (start_day_index + d) % 7 in [1, 4, 5]:
-                model.Add(work[(chen_idx, d)] == 0)
+    # 🌟 處理「固定星期幾休假」
+    for name, weekdays in fixed_rest_dict.items():
+        if name in all_list:
+            s_idx = all_list.index(name)
+            for d in range(num_days):
+                # 檢查這一天是星期幾，如果在指定的星期內，就設定為 0 (放假)
+                if (start_day_index + d) % 7 in weekdays:
+                    model.Add(work[(s_idx, d)] == 0)
 
-    # 處理手動輸入的請假要求
+    # 處理「指定日期請假」
     for name, dates in leave_dict.items():
         if name in all_list:
             s_idx = all_list.index(name)
@@ -132,19 +147,19 @@ def generate_schedule(year, month, leave_dict, sw_list, all_list):
 # ==========================================
 st.markdown("---")
 if st.button(f"🚀 讓 AI 生成 {selected_year} 年 {selected_month} 月份更表", use_container_width=True):
-    # 檢查人數是否足夠營運
     if num_staff < 6:
-        st.warning("⚠️ 警告：目前總員工人數過少，可能無法滿足每天最低 5 人的排班需求，AI 可能會計算失敗。")
+        st.warning("⚠️ 警告：目前總員工人數過少，可能無法滿足每天最低 5 人的排班需求。")
         
     with st.spinner('AI 正在協調假期並尋找最佳排班...'):
         parsed_leaves = parse_leave_requests(leave_requests_text, all_staffs)
-        df = generate_schedule(selected_year, selected_month, parsed_leaves, sw_staffs, all_staffs)
+        parsed_fixed = parse_fixed_weekdays(fixed_rest_text, all_staffs)
+        df = generate_schedule(selected_year, selected_month, parsed_leaves, parsed_fixed, sw_staffs, all_staffs)
         
         if df is not None:
             st.session_state['schedule_df'] = df
-            st.success(f"✅ 生成成功！已套用左側名單內的 {num_staff} 位同事。")
+            st.success(f"✅ 生成成功！")
         else:
-            st.error("❌ 無法排班！請檢查：1. 是否請假人數過多？ 2. 員工人數是否足夠應付每天的最低人手需求？")
+            st.error("❌ 無法排班！請檢查：1. 是否特定日期請假人數過多？ 2. 固定的星期幾放假是否導致某天人手不足？")
 
 if 'schedule_df' in st.session_state:
     st.markdown("### 📝 手動微調區 (雙擊表格修改)")
