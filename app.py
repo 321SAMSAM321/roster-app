@@ -2,15 +2,27 @@ import streamlit as st
 import pandas as pd
 from ortools.sat.python import cp_model
 import io
+import calendar # 🌟 新增：用來自動計算日曆的超級工具
 
 # 網頁標題與設定
 st.set_page_config(page_title="旺角社區客廳 排更系統", layout="wide")
 st.title("📅 旺角社區客廳 - 智能排更與微調系統")
-st.markdown("點擊下方按鈕生成初步更表。生成後，您可以**直接在下方表格中點擊並修改任何內容**，最後再下載成 Excel 檔案。")
+st.markdown("請先選擇年份與月份，點擊生成後，可在下方表格中點擊並修改任何內容，最後下載成 Excel 檔案。")
 
-def generate_schedule():
-    num_days = 30 
-    start_day_index = 2 # 4月1日是星期三
+# 🌟 新增：建立兩個並排的下拉式選單 (年份與月份)
+col1, col2 = st.columns(2)
+with col1:
+    selected_year = st.selectbox("🗓️ 請選擇年份", [2024, 2025, 2026, 2027, 2028], index=2) # 預設選中 2026
+with col2:
+    selected_month = st.selectbox("📅 請選擇月份", list(range(1, 13)), index=4) # 預設選中 5 月 (清單索引4為5)
+
+# 將年份和月份傳入生成函數
+def generate_schedule(year, month):
+    # 🌟 新增：讓系統自動算出這個月有幾天，以及 1 號是星期幾
+    # calendar.weekday() 回傳 0 是星期一，6 是星期日，剛好符合我們的設定！
+    start_day_index = calendar.weekday(year, month, 1)
+    num_days = calendar.monthrange(year, month)[1] 
+    
     days_name = ['一', '二', '三', '四', '五', '六', '日']
     
     sw_staffs = ['李絲格(SW)', '陳家俊(SW)', '朱信恆(SW)', '韓浩文(SW)']
@@ -24,7 +36,7 @@ def generate_schedule():
         for d in range(num_days):
             work[(s, d)] = model.NewBoolVar(f'work_s{s}_d{d}')
 
-    # 基本人手與休假邏輯 (與之前相同)
+    # 基本人手與休假邏輯
     for d in range(num_days):
         model.Add(sum(work[(s, d)] for s in range(num_staff)) >= 5)
         model.Add(sum(work[(s, d)] for s in range(num_staff)) <= 6)
@@ -34,8 +46,11 @@ def generate_schedule():
     for s in range(num_staff):
         for d in range(num_days - 6):
             model.Add(sum(work[(s, d + i)] for i in range(7)) <= 4)
-        model.Add(sum(work[(s, d)] for d in range(num_days)) >= 17)
-        model.Add(sum(work[(s, d)] for d in range(num_days)) <= 18)
+        
+        # 🌟 動態調整：依照該月總天數按比例計算最少上班日
+        min_work_days = int((num_days / 7) * 4) 
+        model.Add(sum(work[(s, d)] for d in range(num_days)) >= min_work_days - 1)
+        model.Add(sum(work[(s, d)] for d in range(num_days)) <= min_work_days + 1)
 
     chen_idx = all_staffs.index('陳家俊(SW)')
     chu_idx = all_staffs.index('朱信恆(SW)')
@@ -52,7 +67,7 @@ def generate_schedule():
         columns = ['同事姓名']
         for d in range(num_days):
             current_weekday = (start_day_index + d) % 7
-            columns.append(f"{d+1}\n({days_name[current_weekday]})")
+            columns.append(f"{month}/{d+1}\n({days_name[current_weekday]})") # 標題加上月份
 
         data = []
         for s in range(num_staff):
@@ -65,33 +80,28 @@ def generate_schedule():
     else:
         return None
 
-# 按鈕：生成更表
-if st.button("🚀 1. 讓 AI 生成 4 月份初步更表"):
+# 按鈕文字會根據選單自動變化
+if st.button(f"🚀 1. 讓 AI 生成 {selected_year} 年 {selected_month} 月份初步更表"):
     with st.spinner('正在計算最佳排班...'):
-        df = generate_schedule()
+        df = generate_schedule(selected_year, selected_month)
         if df is not None:
-            # 將算出的更表存入 session_state，讓它不會在網頁刷新時消失
             st.session_state['schedule_df'] = df
-            st.success("✅ 生成成功！請在下方表格直接點擊修改（例如將 OFF 改成 AL）。")
+            st.success(f"✅ {selected_month} 月份生成成功！請在下方表格直接點擊修改。")
         else:
-            st.error("❌ 無法找到符合條件的排班。")
+            st.error("❌ 無法找到符合條件的排班。可能是當月週末分佈導致條件衝突，請稍後重試。")
 
-# 如果已經生成了更表，顯示互動式表格
 if 'schedule_df' in st.session_state:
     st.markdown("### 📝 2. 手動微調區")
-    
-    # st.data_editor 是靈魂所在！它讓使用者可以直接在網頁上編輯表格
     edited_df = st.data_editor(st.session_state['schedule_df'], use_container_width=True)
     
-    # 準備將修改後的表格轉換為 Excel
     st.markdown("### 📥 3. 下載最終更表")
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        edited_df.to_excel(writer, index=False, sheet_name='4月更表')
+        edited_df.to_excel(writer, index=False, sheet_name=f'{selected_month}月更表')
     
     st.download_button(
-        label="💾 下載修改後的 Excel 檔",
+        label=f"💾 下載 {selected_month} 月份 Excel 檔",
         data=buffer.getvalue(),
-        file_name="旺角社區客廳_手動修改版更表.xlsx",
+        file_name=f"旺角社區客廳_{selected_year}年{selected_month}月更表.xlsx",
         mime="application/vnd.ms-excel"
     )
