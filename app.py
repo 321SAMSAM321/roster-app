@@ -3,14 +3,12 @@ import pandas as pd
 from ortools.sat.python import cp_model
 import io
 import calendar
-import holidays
-from datetime import date
 
 st.set_page_config(page_title="旺角社區客廳 排更系統", layout="wide")
 st.title("📅 旺角社區客廳 - 智能排更與微調系統")
 
 # ==========================================
-# 左側邊欄 (Sidebar)
+# 左側邊欄 (Sidebar) - 員工與固定假期管理
 # ==========================================
 st.sidebar.header("👥 員工名單與固定休假")
 
@@ -25,10 +23,13 @@ normal_staffs = [name.strip() for name in normal_text.split('\n') if name.strip(
 all_staffs = sw_staffs + normal_staffs
 num_staff = len(all_staffs)
 
+st.sidebar.success(f"目前共計：{num_staff} 人 (含 {len(sw_staffs)} 位社工)")
+
+# 固定星期幾休假
 st.sidebar.markdown("---")
 st.sidebar.subheader("🗓️ 固定星期幾休假")
 default_fixed_rest = "朱信恆(SW): 日\n陳家俊(SW): 二, 五, 六"
-fixed_rest_text = st.sidebar.text_area("✍️ 在此輸入固定放假要求：", value=default_fixed_rest, height=80)
+fixed_rest_text = st.sidebar.text_area("✍️ 在此輸入固定放假要求：", value=default_fixed_rest, height=100)
 
 def parse_fixed_weekdays(text, staffs):
     day_map = {'一': 0, '二': 1, '三': 2, '四': 3, '五': 4, '六': 5, '日': 6}
@@ -46,44 +47,20 @@ def parse_fixed_weekdays(text, staffs):
                     fixed_dict[name] = days
     return fixed_dict
 
-# 🌟 新增 1：上月底上班紀錄 (跨月防過勞)
-st.sidebar.markdown("---")
-st.sidebar.subheader("⏮️ 跨月防過勞：上月底上班紀錄")
-st.sidebar.info("請輸入同事在上個月底【最後連續上班的天數】（沒輸入代表上月底最後一天放假）。")
-default_prev_work = "王琴美: 3\n曾詠詩: 1"
-prev_work_text = st.sidebar.text_area("格式 `名字: 連續天數`", value=default_prev_work, height=80)
-
-def parse_prev_work(text, staffs):
-    prev_dict = {}
-    if not text.strip(): return prev_dict
-    text = text.replace('：', ':')
-    for line in text.split('\n'):
-        if ':' in line:
-            parts = line.split(':')
-            name = parts[0].strip()
-            if name in staffs and parts[1].strip().isdigit():
-                prev_dict[name] = min(6, int(parts[1].strip())) # 最多記錄前6天
-    return prev_dict
-
-# 🌟 新增 2：分開設定「平日」與「週末/紅日」的人手需求
+# 每日人手需求設定區
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ 每日人手需求設定")
-st.sidebar.markdown("**🏢 平日 (一至五)**")
-col_min1, col_max1 = st.sidebar.columns(2)
-with col_min1: min_staff_wd = st.number_input("平日最少總人數", min_value=1, value=5)
-with col_max1: min_sw_wd = st.number_input("平日最少社工", min_value=0, value=2)
-
-st.sidebar.markdown("**🏖️ 週末及香港公眾假期 (紅日)**")
-col_min2, col_max2 = st.sidebar.columns(2)
-with col_min2: min_staff_hd = st.number_input("紅日最少總人數", min_value=1, value=6)
-with col_max2: min_sw_hd = st.number_input("紅日最少社工", min_value=0, value=3)
-
-# 簡化最高人數設定 (預設為最低人數+1)
-max_staff_wd, max_sw_wd = min_staff_wd + 1, min_sw_wd + 1
-max_staff_hd, max_sw_hd = min_staff_hd + 1, min_sw_hd + 1
+st.sidebar.info("請設定每天最少/最多需要多少人上班。")
+col_min, col_max = st.sidebar.columns(2)
+with col_min:
+    min_staff = st.number_input("最少總人數", min_value=1, max_value=20, value=5)
+    min_sw = st.number_input("最少社工", min_value=0, max_value=10, value=2)
+with col_max:
+    max_staff = st.number_input("最多總人數", min_value=1, max_value=20, value=6)
+    max_sw = st.number_input("最多社工", min_value=0, max_value=10, value=3)
 
 # ==========================================
-# 主畫面
+# 主畫面：選擇年月與預先請假
 # ==========================================
 col1, col2 = st.columns(2)
 with col1:
@@ -109,52 +86,53 @@ def parse_leave_requests(text, staffs):
                 leave_dict[name] = dates
     return leave_dict
 
-# 自動診斷函數 (加入紅日判斷)
-def diagnose_conflicts(year, month, leave_dict, fixed_rest_dict, sw_list, all_list):
+# 🌟 新增：衝突自動診斷函數
+def diagnose_conflicts(year, month, leave_dict, fixed_rest_dict, sw_list, all_list, min_t, min_s):
     start_day_index = calendar.weekday(year, month, 1)
     num_days = calendar.monthrange(year, month)[1] 
     days_name = ['一', '二', '三', '四', '五', '六', '日']
-    hk_holidays = holidays.HK(years=[year]) # 取得香港紅日
     issues = []
     
     for d in range(num_days):
-        current_date = date(year, month, d+1)
         current_weekday = (start_day_index + d) % 7
-        is_holiday = current_weekday >= 5 or current_date in hk_holidays
-        date_str = f"{month}月{d+1}日(星期{days_name[current_weekday]}){' 🎈紅日' if is_holiday else ''}"
-        
-        req_min_t = min_staff_hd if is_holiday else min_staff_wd
-        req_min_s = min_sw_hd if is_holiday else min_sw_wd
+        date_str = f"{month}月{d+1}日(星期{days_name[current_weekday]})"
         
         unavailable_staff = []
         unavailable_sw = []
         
+        # 核對當天有誰不能上班
         for name in all_list:
             is_out = False
-            if name in fixed_rest_dict and current_weekday in fixed_rest_dict[name]: is_out = True
-            if name in leave_dict and (d + 1) in leave_dict[name]: is_out = True
+            if name in fixed_rest_dict and current_weekday in fixed_rest_dict[name]:
+                is_out = True
+            if name in leave_dict and (d + 1) in leave_dict[name]:
+                is_out = True
             
             if is_out:
                 unavailable_staff.append(name)
-                if name in sw_list: unavailable_sw.append(name)
+                if name in sw_list:
+                    unavailable_sw.append(name)
         
         available_total = len(all_list) - len(unavailable_staff)
         available_sw = len(sw_list) - len(unavailable_sw)
         
-        if available_total < req_min_t:
-            issues.append(f"🔴 **{date_str}**：最少需 {req_min_t} 人，但當天有 **{len(unavailable_staff)} 人** 放假 (`{', '.join(unavailable_staff)}`)，只剩 **{available_total}** 人。")
-        if available_sw < req_min_s:
-            issues.append(f"🟠 **{date_str}**：最少需 {req_min_s} 名社工，但社工只剩 **{available_sw}** 人 (當天放假：`{', '.join(unavailable_sw) if unavailable_sw else '無'}`)。")
+        # 如果剩下的人數低於左側設定的最低要求，就寫入報告
+        if available_total < min_t:
+            issues.append(f"🔴 **{date_str}**：最少需 {min_t} 人，但當天有 **{len(unavailable_staff)} 人** 放假 (`{', '.join(unavailable_staff)}`)，只剩 **{available_total}** 人。")
+            
+        if available_sw < min_s:
+            issues.append(f"🟠 **{date_str}**：最少需 {min_s} 名社工，但社工只剩 **{available_sw}** 人 (當天放假社工：`{', '.join(unavailable_sw) if unavailable_sw else '無'}`)。")
             
     return issues
 
-# 核心排班大腦
-def generate_schedule(year, month, leave_dict, fixed_rest_dict, prev_work_dict, sw_list, all_list):
+# ==========================================
+# 核心排班大腦 (維持第十五版的嚴格規則)
+# ==========================================
+def generate_schedule(year, month, leave_dict, fixed_rest_dict, sw_list, all_list, min_t, max_t, min_s, max_s):
     start_day_index = calendar.weekday(year, month, 1)
     num_days = calendar.monthrange(year, month)[1] 
     days_name = ['一', '二', '三', '四', '五', '六', '日']
     total_staff_count = len(all_list)
-    hk_holidays = holidays.HK(years=[year]) # 載入香港紅日
     
     model = cp_model.CpModel()
     work = {}
@@ -162,49 +140,24 @@ def generate_schedule(year, month, leave_dict, fixed_rest_dict, prev_work_dict, 
         for d in range(num_days):
             work[(s, d)] = model.NewBoolVar(f'work_s{s}_d{d}')
 
-    # 1. 動態配置平日與紅日的人手需求
+    # 1. 每天人手需求動態設定
     for d in range(num_days):
-        current_date = date(year, month, d+1)
-        current_weekday = (start_day_index + d) % 7
-        is_holiday = current_weekday >= 5 or current_date in hk_holidays
-        
-        req_min_t = min_staff_hd if is_holiday else min_staff_wd
-        req_max_t = max_staff_hd if is_holiday else max_staff_wd
-        req_min_s = min_sw_hd if is_holiday else min_sw_wd
-        req_max_s = max_sw_hd if is_holiday else max_sw_wd
+        model.Add(sum(work[(s, d)] for s in range(total_staff_count)) >= min_t)
+        model.Add(sum(work[(s, d)] for s in range(total_staff_count)) <= max_t)
+        model.Add(sum(work[(s, d)] for s in range(len(sw_list))) >= min_s)
+        model.Add(sum(work[(s, d)] for s in range(len(sw_list))) <= max_s)
 
-        model.Add(sum(work[(s, d)] for s in range(total_staff_count)) >= req_min_t)
-        model.Add(sum(work[(s, d)] for s in range(total_staff_count)) <= req_max_t)
-        model.Add(sum(work[(s, d)] for s in range(len(sw_list))) >= req_min_s)
-        model.Add(sum(work[(s, d)] for s in range(len(sw_list))) <= req_max_s)
-
-    # 2. 🌟 完美的跨月防過勞機制 (納入上月底紀錄)
-    past_work = {}
+    # 2. 第十五版嚴格的個人工時與休假頻率
     for s in range(total_staff_count):
-        name = all_list[s]
-        consecutive_days = prev_work_dict.get(name, 0)
-        # 設定上個月最後 6 天的上班狀態 (past_d: 0~5，5代表上個月最後一天)
-        for past_d in range(6):
-            past_work[(s, past_d)] = 1 if past_d >= (6 - consecutive_days) else 0
-
-    for s in range(total_staff_count):
-        # 檢查每一個 7 天的區間（包含跨月區間）
-        for start_offset in range(-6, num_days - 6):
-            window_sum = 0
-            for i in range(7):
-                day_idx = start_offset + i
-                if day_idx < 0:
-                    past_d = 6 + day_idx
-                    window_sum += past_work[(s, past_d)]
-                else:
-                    window_sum += work[(s, day_idx)]
-            model.Add(window_sum <= 4)
+        # 任何連續 7 天內，最多只能上班 4 天
+        for d in range(num_days - 6):
+            model.Add(sum(work[(s, d + i)] for i in range(7)) <= 4)
             
-        target_work_days = int((num_days / 7) * 4) 
-        model.Add(sum(work[(s, d)] for d in range(num_days)) >= target_work_days - 1)
-        model.Add(sum(work[(s, d)] for d in range(num_days)) <= target_work_days + 1)
+        min_work_days = int((num_days / 7) * 4) 
+        model.Add(sum(work[(s, d)] for d in range(num_days)) >= min_work_days - 1)
+        model.Add(sum(work[(s, d)] for d in range(num_days)) <= min_work_days + 1)
 
-    # 3. 固定星期幾休假
+    # 3. 處理「固定星期幾休假」
     for name, weekdays in fixed_rest_dict.items():
         if name in all_list:
             s_idx = all_list.index(name)
@@ -212,7 +165,7 @@ def generate_schedule(year, month, leave_dict, fixed_rest_dict, prev_work_dict, 
                 if (start_day_index + d) % 7 in weekdays:
                     model.Add(work[(s_idx, d)] == 0)
 
-    # 4. 特定日期請假
+    # 4. 處理「指定日期請假」
     for name, dates in leave_dict.items():
         if name in all_list:
             s_idx = all_list.index(name)
@@ -221,18 +174,14 @@ def generate_schedule(year, month, leave_dict, fixed_rest_dict, prev_work_dict, 
                     model.Add(work[(s_idx, day - 1)] == 0)
 
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 10.0 
+    solver.parameters.max_time_in_seconds = 10.0 # 給 AI 最多 10 秒鐘思考，避免網頁卡死
     status = solver.Solve(model)
 
     if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
         columns = ['同事姓名']
         for d in range(num_days):
-            current_date = date(year, month, d+1)
             current_weekday = (start_day_index + d) % 7
-            is_holiday = current_weekday >= 5 or current_date in hk_holidays
-            # 標題自動加上紅日標記
-            header = f"{month}/{d+1}\n({days_name[current_weekday]})" + ("🎈" if is_holiday else "")
-            columns.append(header)
+            columns.append(f"{month}/{d+1}\n({days_name[current_weekday]})")
 
         data = []
         for s in range(total_staff_count):
@@ -249,28 +198,38 @@ def generate_schedule(year, month, leave_dict, fixed_rest_dict, prev_work_dict, 
 # ==========================================
 st.markdown("---")
 if st.button(f"🚀 讓 AI 生成 {selected_year} 年 {selected_month} 月份更表", use_container_width=True):
-    with st.spinner('AI 正在協調假期、香港紅日與跨月工時 (最多運算 10 秒)...'):
-        parsed_leaves = parse_leave_requests(leave_requests_text, all_staffs)
-        parsed_fixed = parse_fixed_weekdays(fixed_rest_text, all_staffs)
-        parsed_prev = parse_prev_work(prev_work_text, all_staffs)
-        
-        df = generate_schedule(selected_year, selected_month, parsed_leaves, parsed_fixed, parsed_prev, sw_staffs, all_staffs)
-        
-        if df is not None:
-            st.session_state['schedule_df'] = df
-            st.success(f"✅ 生成成功！已套用香港公眾假期，並確保所有人跨月無過勞。")
-        else:
-            st.error("❌ 無法排班！AI 診斷報告如下：")
-            conflict_reports = diagnose_conflicts(selected_year, selected_month, parsed_leaves, parsed_fixed, sw_staffs, all_staffs)
+    if num_staff < min_staff:
+        st.warning(f"⚠️ 警告：目前總員工只有 {num_staff} 人，但你設定每天最少要 {min_staff} 人上班，這絕對排不出來！請調低需求或增加員工。")
+    elif max_staff < min_staff or max_sw < min_sw:
+         st.warning(f"⚠️ 警告：「最多人數」不能小於「最少人數」，請檢查左側的數字設定！")
+    else:
+        with st.spinner('AI 正在協調假期並尋找最佳排班 (最多運算 10 秒)...'):
+            parsed_leaves = parse_leave_requests(leave_requests_text, all_staffs)
+            parsed_fixed = parse_fixed_weekdays(fixed_rest_text, all_staffs)
             
-            if conflict_reports:
-                for report in conflict_reports: st.warning(report)
-                st.info("💡 解決方案：請減少上述日期的請假人數，或前往左側調低「最少總人數」。")
+            df = generate_schedule(selected_year, selected_month, parsed_leaves, parsed_fixed, sw_staffs, all_staffs, min_staff, max_staff, min_sw, max_sw)
+            
+            if df is not None:
+                st.session_state['schedule_df'] = df
+                st.success(f"✅ 生成成功！已確保每天最少 {min_staff} 人上班（含 {min_sw} 位社工）。")
             else:
-                st.warning("⚠️ 診斷結果：排班失敗是因為勞工規則。可能是因為某人「上月底連續上班紀錄」加上「本月初期沒有請假」，導致 AI 無法在第一週為他安排合法假期。")
+                st.error("❌ 無法排班！AI 診斷報告如下：")
+                
+                # 觸發診斷系統
+                conflict_reports = diagnose_conflicts(selected_year, selected_month, parsed_leaves, parsed_fixed, sw_staffs, all_staffs, min_staff, min_sw)
+                
+                if conflict_reports:
+                    # 情況一：明顯有人手不足的日子
+                    for report in conflict_reports:
+                        st.warning(report)
+                    st.info("💡 解決方案：請減少上述日期的請假人數，或前往左側調低「最少總人數」及「最少社工」的要求。")
+                else:
+                    # 情況二：帳面人數足夠，但因為第十五版的「嚴格勞工法則」導致衝突
+                    st.warning("⚠️ 診斷結果：這週並沒有任何一天的可用人數低於最低要求。排班失敗是因為條件太過緊繃。")
+                    st.info("💡 發生原因：目前系統採用最嚴格的「每連續 7 天內最多只能上班 4 天」規則。如果某位同事請了特定假期，加上他原本的固定休假，會迫使其他同事必須連續代班，從而觸發「不准連返 5 日」的保護機制，導致 AI 放棄排班。\n\n**解決方案：請嘗試減少一兩位同事的請假設定，給 AI 多一點排班的呼吸空間。**")
 
 if 'schedule_df' in st.session_state:
-    st.markdown("### 📝 手動微調區 (雙擊表格修改，🎈代表週末或紅日)")
+    st.markdown("### 📝 手動微調區 (雙擊表格修改)")
     edited_df = st.data_editor(st.session_state['schedule_df'], use_container_width=True)
     
     buffer = io.BytesIO()
