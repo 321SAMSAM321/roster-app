@@ -7,7 +7,7 @@ import holidays
 from datetime import date
 
 st.set_page_config(page_title="旺角社區客廳 排更系統", layout="wide")
-st.title("📅 旺角社區客廳 - 智能排更與微調系統 (第十六版)")
+st.title("📅 旺角社區客廳 - 智能排更與微調系統 (第十六版修正版)")
 
 # ==========================================
 # 左側邊欄
@@ -45,7 +45,6 @@ def parse_fixed_weekdays(text, staffs):
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ 每日人手需求設定")
-# 分開平日與紅日，這能解決請假太多時的調配問題
 st.sidebar.markdown("**🏢 平日設定**")
 col_wd_min, col_wd_sw = st.sidebar.columns(2)
 with col_wd_min: min_staff_wd = st.number_input("平日總人數", value=4)
@@ -53,20 +52,21 @@ with col_wd_sw: min_sw_wd = st.number_input("平日社工", value=2)
 
 st.sidebar.markdown("**🎈 週末/紅日設定**")
 col_hd_min, col_hd_sw = st.sidebar.columns(2)
-with col_hd_min: min_staff_hd = st.number_input("紅日總人數", value=5)
-with col_hd_sw: min_sw_hd = st.number_input("紅日社工", value=2)
+with col_hd_min: min_staff_hd = st.number_input("紅日總人數", value=4)
+with col_hd_sw: min_sw_hd = st.number_input("紅日社工", value=1)
 
 # ==========================================
 # 主畫面
 # ==========================================
 col1, col2 = st.columns(2)
 with col1: selected_year = st.selectbox("🗓️ 年份", [2024, 2025, 2026], index=2)
-with col2: selected_month = st.selectbox("📅 月份", list(range(1, 13)), index=2) # 預設3月
+with col2: selected_month = st.selectbox("📅 月份", list(range(1, 13)), index=3) # 4月
 
 st.markdown("### 🏖️ 指定日期請假 (大假 AL / 補假 CL)")
-leave_requests_text = st.text_area("格式：名字: 日期 (換行輸入另一位)", height=120, 
-    value="李絲格(SW): 5, 6\n朱信恆(SW): 3, 6\n李琳: 4, 5\n曾詠詩: 19, 20, 21, 22\n王琴美: 9, 10, 11, 12, 13, 14")
+default_leaves = "李絲格(SW): 5, 6\n朱信恆(SW): 3, 6\n李琳: 4, 5\n曾詠詩: 19, 20, 21, 22\n王琴美: 9, 10, 11, 12, 13, 14"
+leave_requests_text = st.text_area("格式：名字: 日期 (換行輸入另一位)", height=120, value=default_leaves)
 
+# ✅ 修正後的解析函數，解決了 UnboundLocalError
 def parse_leave_requests(text, staffs):
     leave_dict = {}
     if not text.strip(): return leave_dict
@@ -76,7 +76,8 @@ def parse_leave_requests(text, staffs):
             parts = line.split(':')
             name = parts[0].strip()
             if name in staffs:
-                dates = [int(x.strip()) for x in dates_str.split(',') if (dates_str := parts[1]) and x.strip().isdigit()]
+                dates_str = parts[1]
+                dates = [int(x.strip()) for x in dates_str.split(',') if x.strip().isdigit()]
                 leave_dict[name] = dates
     return leave_dict
 
@@ -92,7 +93,6 @@ def generate_schedule(year, month, leave_dict, fixed_rest_dict, sw_list, all_lis
         for d in range(num_days):
             work[(s, d)] = model.NewBoolVar(f'work_s{s}_d{d}')
 
-    # 1. 每日人手需求 (智能識別平日/紅日)
     for d in range(num_days):
         curr_date = date(year, month, d+1)
         is_hd = (start_day_index + d) % 7 >= 5 or curr_date in hk_holidays
@@ -102,18 +102,15 @@ def generate_schedule(year, month, leave_dict, fixed_rest_dict, sw_list, all_lis
         model.Add(sum(work[(s, d)] for s in range(len(all_list))) >= req_total)
         model.Add(sum(work[(s, d)] for s in range(len(sw_list))) >= req_sw)
 
-    # 2. 修改核心規則：5/7 原則 (更符合現實，增加排班成功率)
     for s in range(len(all_list)):
+        # 修改為 5/7 規則，增加調配空間
         for d in range(num_days - 6):
-            # 任何連續 7 天，最多上班 5 天 (即每週最少放 2 天假)
             model.Add(sum(work[(s, d + i)] for i in range(7)) <= 5)
         
-        # 整月工時平衡
-        target_days = int((num_days / 7) * 5)
-        model.Add(sum(work[(s, d)] for d in range(num_days)) >= target_days - 2)
-        model.Add(sum(work[(s, d)] for d in range(num_days)) <= target_days + 2)
+        target_days = int((num_days / 7) * 4) 
+        model.Add(sum(work[(s, d)] for d in range(num_days)) >= target_days - 1)
+        model.Add(sum(work[(s, d)] for d in range(num_days)) <= target_days + 1)
 
-    # 3. 處理固定休假與請假
     for name, weekdays in fixed_rest_dict.items():
         if name in all_list:
             s_idx = all_list.index(name)
@@ -145,16 +142,13 @@ def generate_schedule(year, month, leave_dict, fixed_rest_dict, sw_list, all_lis
 # 執行與匯出
 # ==========================================
 if st.button(f"🚀 生成 {selected_month} 月更表", use_container_width=True):
-    with st.spinner('AI 正在計算最佳「互換」方案...'):
+    with st.spinner('AI 正在尋找最佳互換方案...'):
         parsed_leaves = parse_leave_requests(leave_requests_text, all_staffs)
         parsed_fixed = parse_fixed_weekdays(fixed_rest_text, all_staffs)
         df = generate_schedule(selected_year, selected_month, parsed_leaves, parsed_fixed, sw_staffs, all_staffs)
         
         if df is not None:
             st.session_state['schedule_df'] = df
-            st.success("✅ 生成成功！AI 已自動完成同事間的「互換代班」。")
+            st.success("✅ 生成成功！")
         else:
-            st.error("❌ 依然無法排班！這代表請假天數已超過 9 人團隊的負荷極限。建議將「平日總人數」暫時調低至 3 人再試。")
-
-if 'schedule_df' in st.session_state:
-    st.data_editor(st.session_state['schedule_df'], use_container_width=True)
+            st.error("❌ 無法排
